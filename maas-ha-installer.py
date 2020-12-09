@@ -60,6 +60,14 @@ def get_user_lp_id():
     lp_id = input('Enter launchpad id: ')
     return lp_id
 
+def configure_maas_snaps():
+    gateway = get_lxd_bridge_gateway('lxdbr0')
+    subnet_ls = gateway.split('.')
+    subnet_ls[3] = '253'
+    vip_addr = '.'.join(subnet_ls)       
+    for i in range(1,4):
+        maas_url = 'http://' + get_container_ip('maas-snap-%s' %i ) + ':5240/MAAS'
+        run('lxc exec maas-snap-%s -- sh -c "sudo maas init region+rack --database-uri postgres://maas:password@%s/maasdb --maas-url %s --force"' % (i,vip_addr,maas_url) )
 def configure_kvm_host():
     # run at the end, so it doesn't muck with get_ip function
     pass
@@ -79,10 +87,14 @@ def configure_maas_network_on_containers():
 def configure_lxd_profile():
     profile_template = '''####
 config:
-  boot.autostart: "false" 
-  raw.lxc: lxc.apparmor.profile=unconfined
+  raw.lxc: |-
+    lxc.mount.auto=sys:rw
+    lxc.cgroup.devices.allow = c 10:237 rwm
+    lxc.apparmor.profile = unconfined
+    lxc.cgroup.devices.allow = b 7:* rwm
   security.nesting: "true"
-  security.privileged: "true"
+  security.privileged: "true"    
+  boot.autostart: "false" 
   user.user-data: |
     #cloud-config
     package_update: true
@@ -111,6 +123,30 @@ devices:
     path: /
     pool: default
     type: disk
+  loop0:
+    path: /dev/loop0
+    type: unix-block
+  loop1:
+    path: /dev/loop1
+    type: unix-block
+  loop2:
+    path: /dev/loop2
+    type: unix-block
+  loop3:
+    path: /dev/loop3
+    type: unix-block
+  loop4:
+    path: /dev/loop4
+    type: unix-block
+  loop5:
+    path: /dev/loop5
+    type: unix-block
+  loop6:
+    path: /dev/loop6
+    type: unix-block
+  loop7:
+    path: /dev/loop7
+    type: unix-block    
 '''
 
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
@@ -166,7 +202,8 @@ def create_containers():
     run(cmd)        
 
 def get_container_ip(container_name):
-    cmd = "lxc list %s -c 4 --format csv|awk '{print $1}'" % (container_name)
+    #cmd = "lxc list %s -c 4 --format csv|awk '{print $1}'" % (container_name)
+    cmd = '''lxc list %s -c 4 --format csv |cut -d "\\"" -f2|awk '{print $1}'|head -1''' % container_name
     ip = run(cmd).decode('utf-8')
     return ip 
 
@@ -217,6 +254,7 @@ hot_standby_feedback = on
 restart_after_crash = off
 max_connections = 300
 synchronous_commit = on
+#data_directory = '/var/lib/postgresql/10/main/'
 '''
     container_one_ip = get_container_ip('maas-snap-1')
     container_two_ip = get_container_ip('maas-snap-2')
@@ -226,7 +264,10 @@ synchronous_commit = on
     subnet_ls = gateway.split('.')
     subnet_ls[3] = '0'
     subnet_addr = '.'.join(subnet_ls) + '/' + cidr
-
+    # initialize maas db before doing ha
+    run('''lxc exec maas-snap-1 -- sh -c "sudo -u postgres psql -c \\"CREATE USER \\"maas\\" WITH ENCRYPTED PASSWORD 'password'\\""''')
+    run("""lxc exec maas-snap-1 -- sh -c 'sudo -u postgres createdb -O "maas" "maasdb"'""")
+    run('lxc exec maas-snap-1 sudo systemctl restart postgresql')    
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
         tmp_file.write(postgres_conf_template)
 
@@ -239,21 +280,26 @@ synchronous_commit = on
         # configure pg_hba.conf
         replication_cmd="lxc exec maas-snap-%s -- sh -c 'echo host    replication    postgres     %s    trust |sudo tee -a /etc/postgresql/10/main/pg_hba.conf'"  \
         % (i, subnet_addr)
-        access_cmd="lxc exec maas-snap-%s -- sh -c 'echo host    maaasdb    maas     %s   md5 |sudo tee -a /etc/postgresql/10/main/pg_hba.conf'"  \
+        access_cmd="lxc exec maas-snap-%s -- sh -c 'echo host    maasdb    maas     %s   md5 |sudo tee -a /etc/postgresql/10/main/pg_hba.conf'"  \
         % (i, subnet_addr)  
         run(replication_cmd)
         run(access_cmd)
         run("""lxc exec maas-snap-%s -- sh -c 'sed -i "s/\\^node/node/g" /usr/lib/ocf/resource.d/heartbeat/pgsql'""" % i)
+        # configure pg stat
+        run('''lxc exec maas-snap-%s -- sh -c \'echo "d /var/run/postgresql/10-main.pg_stat_tmp 2750 postgres postgres" > /etc/tmpfiles.d/1-main.pg_stat_tmp.conf\'''' % i)
+        run("lxc exec maas-snap-%s systemd-tmpfiles --create" % i)
+
         if i == 1:
             copy_cmd = "lxc exec maas-snap-1 -- sh -c 'sudo cp /etc/postgresql/10/main/pg_hba.conf /var/lib/postgresql/10/main/.'"
+            copy_cmd2 = "lxc exec maas-snap-1 -- sh -c 'sudo cp /etc/postgresql/10/main/pg_ident.conf /var/lib/postgresql/10/main/.'"
             chown_cmd = "lxc exec maas-snap-1 -- sh -c 'sudo chown postgres:postgres /var/lib/postgresql/10/main/pg_hba.conf'"
+            chown_cmd2 = "lxc exec maas-snap-1 -- sh -c 'sudo chown postgres:postgres /var/lib/postgresql/10/main/pg_ident.conf'"
             install_cmd = "lxc exec maas-snap-1 -- sh -c 'install -o postgres -g postgres -m 0700 -d /var/lib/postgresql/10/main/tmp'"
             run(copy_cmd)
             run(chown_cmd)
+            run(copy_cmd2)
+            run(chown_cmd2)
             run(install_cmd)
-            run('lxc exec maas-snap-1 sudo systemctl restart postgresql')
-            run("""lxc exec maas-snap-1 -- sh -c 'sudo -u postgres psql -c "CREATE USER \"maas\" WITH ENCRYPTED PASSWORD 'password'"'""")
-            run("""lxc exec maas-snap-1 -- sh -c 'sudo -u postgres createdb -O "maas" "maasdb"'""")
             run('lxc exec maas-snap-1 sudo systemctl restart postgresql')
             sync_postgres_slaves()
         # configure service to start manually
@@ -290,9 +336,7 @@ def sync_postgres_slaves(vip=None):
     run(sync_cmd1, output=False)
     sleep(45)
     run(sync_cmd2, output=False)
-
-def configure_maas_snap():
-    pass
+    
 
 def configure_postgres_pacemaker():
     gateway = get_lxd_bridge_gateway('lxdbr0')
@@ -462,3 +506,4 @@ generate_netplan('maas-snap-3')
 configure_hosts_file()
 sleep(20)
 configure_postgres()
+configure_maas_snaps()
