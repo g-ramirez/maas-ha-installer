@@ -66,9 +66,11 @@ def configure_maas_snaps():
     subnet_ls[3] = '253'
     vip_addr = '.'.join(subnet_ls)       
     for i in range(1,4):
-        maas_url = 'http://' + get_container_ip('maas-snap-%s' %i ) + ':5240/MAAS'
+        maas_url = 'http://' + get_container_ip('maas-snap-%s' %i ) + ':80/MAAS'
         run('lxc exec maas-snap-%s -- sh -c "sudo maas init region+rack --database-uri postgres://maas:password@%s/maasdb --maas-url %s --force"' % (i,vip_addr,maas_url) )
         sleep(30)
+        if i == 3:
+            run('lxc exec maas-snap-3 sudo crm resource cleanup pgsql')
 def configure_kvm_host():
     # run at the end, so it doesn't muck with get_ip function
     pass
@@ -106,6 +108,7 @@ config:
     package_update: true
     packages:
       - openssh-server
+      - haproxy
       - corosync
       - pacemaker
       - pcs
@@ -198,6 +201,27 @@ def is_postgres_installed():
             return False
     return True    
 
+
+def is_haproxy_installed():
+    for i in range(1,4):
+        cmd = "lxc exec maas-snap-%s -- sh -c 'dpkg -l|grep haproxy'" % (i)
+        output = run(cmd)   
+        if output:
+            continue
+        else:
+            return False
+    return True      
+
+def is_haproxy_installed():
+    for i in range(1,4):
+        cmd = "lxc exec maas-snap-%s -- sh -c 'dpkg -l|grep corosync'" % (i)
+        output = run(cmd)   
+        if output:
+            continue
+        else:
+            return False
+    return True    
+
 def create_containers():
     cleanup = "lxc delete maas-snap-1 --force && lxc delete maas-snap-2 --force && lxc delete maas-snap-3 --force"
     cmd = "lxc launch ubuntu:bionic maas-snap-1 -p maas && lxc launch ubuntu:bionic maas-snap-2 -p maas  && lxc launch ubuntu:bionic maas-snap-3 -p maas"
@@ -213,12 +237,44 @@ def get_container_ip(container_name):
     ip = run(cmd).decode('utf-8')
     return ip 
 
+def configure_haproxy():
+    container_one_ip = get_container_ip('maas-snap-1')
+    container_two_ip = get_container_ip('maas-snap-2')
+    container_three_ip = get_container_ip('maas-snap-3')
+    template = '''###
+frontend maas
+    bind    *:80
+    retries 3
+    option  redispatch
+    option  http-server-close
+    default_backend maas
+
+backend maas
+    timeout server 90s
+    balance source
+    hash-type consistent
+    server localhost localhost:5240 check
+    server maas-api-1 %s:5240 check
+    server maas-api-2 %s:5240 check
+    server maas-api-2 %s:5240 check''' % (container_one_ip, container_two_ip, container_three_ip)
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
+        tmp_file.write(template)  
+
+    for i in range(1,4):
+        lxd_push_command = 'lxc file push %s %s/home/ubuntu/haproxy.conf' % (tmp_file.name, 'maas-snap-%s' % i)
+        run(lxd_push_command)
+        lxd_cp_command = 'lxc exec %s -- sh -c "sudo cp /home/ubuntu/haproxy.conf /etc/haproxy/haproxy.cfg"' % ('maas-snap-%s' % i)
+        lxd_haproxy_reset = 'lxc exec %s -- sh -c "sudo systemctl restart haproxy"' % ('maas-snap-%s' % i)
+        run(lxd_cp_command)
+        run(lxd_haproxy_reset)
+
 def generate_netplan(container_name):
     # wait at least a minute and a half while cloud-init does its dirty work
     ip = get_container_ip(container_name)
     gateway = get_lxd_bridge_gateway('lxdbr0')
     cidr = get_lxd_bridge_subnet('lxdbr0')
-    eth1_ip = '192.168.122' + str(randint(2,254))
+    eth1_ip = '192.168.122.' + str(randint(2,254))
     template = '''#####
 network:
     version: 2
@@ -454,23 +510,27 @@ totem {
 	rrp_mode: none
 	transport: udpu
 }
-quorum {
-	provider: corosync_votequorum
-	}
 nodelist {
 	node {
 		ring0_addr: %s
 		nodeid: 1
+        name: maas-snap-1
 	}
 	node {
 		ring0_addr: %s
 		nodeid: 2
+        name: maas-snap-2
 	}
 	node {
 		ring0_addr: %s
 		nodeid: 3
+        name: maas-snap-3
 	}
 }
+quorum{
+        provider: corosync_votequorum
+        expected_votes: 3 
+    }
 logging {
 	fileline: off
 	to_stderr: yes
@@ -505,26 +565,61 @@ def configure_hosts_file():
         run(lxd_three_cmd)
 
 def create_maas_admin():
-    pass
-
+    cmd1 = 'lxc exec maas-snap-3 -- sh -c "maas createadmin --username admin --password password --email gabrielramirez1109@gmail.com --ssh-import lp:gabriel1109"'
+    cmd2 = 'lxc exec maas-snap-3 -- sh -c "maas apikey --username admin |tee -a /home/ubuntu/api-key"'
+    run(cmd1)
+    run(cmd2)
 def import_images_and_keys():
-    pass
+    container_three_ip = get_container_ip('maas-snap-3')
+    maas_url = 'http://%s/MAAS' % container_three_ip
+    api_key = run('lxc exec maas-snap-3 -- sh -c "maas apikey --username admin"')
+    login_cmd = 'lxc exec maas-snap-3 -- sh -c "maas login admin %s %s"'  % (maas_url, api_key.decode())
+    run(login_cmd)
+
 
 def add_kvm_pod():
     pass
 
+def configure_maas_vip():
+    gateway = get_lxd_bridge_gateway('lxdbr0')
+    cidr = get_lxd_bridge_subnet('lxdbr0')
+    subnet_ls = gateway.split('.')
+    subnet_ls[3] = '252'
+    vip_addr = '.'.join(subnet_ls) 
+    template = '''####
+#!/bin/bash
+crm configure property stonith-enabled="false"
+crm configure rsc_defaults resource-stickiness=INFINITY
+crm configure rsc_defaults migration-threshold=10
+crm configure primitive res_maas_vip ocf:heartbeat:IPaddr2 \
+    params ip=%s cidr_netmask=%s op monitor interval=10s meta \
+    migration-threshold=0 
+crm configure primitive haproxy lsb:haproxy op monitor interval=15s''' % (vip_addr, cidr)
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
+        tmp_file.write(template)    
+    lxd_push_command = 'lxc file push %s maas-snap-3/home/ubuntu/maas_reg_vip.sh' % (tmp_file.name)
+    lxd_chmod_command = 'lxc exec maas-snap-3 chmod +x /home/ubuntu/maas_reg_vip.sh'
+    lxd_create_command = 'lxc exec maas-snap-3 -- sh -c " sh /home/ubuntu/maas_reg_vip.sh"'
+    run(lxd_push_command)
+    run(lxd_chmod_command)
+    run(lxd_create_command)
 
-configure_lxd()
-create_containers()
-while True:
-    if is_maas_installed() and is_postgres_installed():
-        break
-    else:
-        sleep(30)       
-generate_netplan('maas-snap-1')
-generate_netplan('maas-snap-2')
-generate_netplan('maas-snap-3')
-configure_hosts_file()
-sleep(20)
-configure_postgres()
-configure_maas_snaps()
+
+# configure_lxd()
+# create_containers()
+# while True:
+#     if is_maas_installed() and is_postgres_installed() and is_haproxy_installed():
+#         break
+#     else:
+#         sleep(30)       
+# generate_netplan('maas-snap-1')
+# generate_netplan('maas-snap-2')
+# generate_netplan('maas-snap-3')
+# configure_hosts_file()
+# sleep(90)
+# configure_postgres()
+# configure_haproxy()
+# configure_maas_snaps()
+# create_maas_admin()
+# configure_maas_vip()
+import_images_and_keys()
