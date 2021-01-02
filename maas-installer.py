@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 from time import sleep
-
+from random import randint
 def run(cmd, output=True, shell=True, poll=False):
     print(cmd)
     if output:
@@ -46,7 +46,7 @@ def configure_lxd():
     if run(storage_cmd):
         print("a storage pool is already configured....")
     else:
-        run('sudo apt-get install zfsutils-linux -y')
+        run('sudo apt install zfsutils-linux -y')
         status=run("lxc storage create default zfs",output=False)    
         if int(status)==1:
             run("lxc storage create default dir ")
@@ -60,26 +60,15 @@ def get_user_lp_id():
     lp_id = input('Enter launchpad id: ')
     return lp_id
 
-def configure_maas():
+def configure_maas_snaps():
     gateway = get_lxd_bridge_gateway('lxdbr0')
     subnet_ls = gateway.split('.')
     subnet_ls[3] = '253'
-    vip_addr = '.'.join(subnet_ls)
-    region_template = '''###
-database_host: %s
-database_name: maasdb
-database_pass: password
-database_port: 5432
-database_user: maas
-''' % vip_addr           
-    with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
-        tmp_file.write(region_template)
-    for i in range(1,4):      
-        lxd_push_command = 'lxc file push %s maas-snap-%s/home/ubuntu/regiond.conf' % (tmp_file.name, i)
-        lxd_cp_command = 'lxc exec maas-snap-%s sudo cp /home/ubuntu/regiond.conf /etc/maas/regiond.conf' % (i)
-        run(lxd_push_command)
-        run(lxd_cp_command)
-        run('lxc exec maas-snap-%s -- sh -c  "sudo apt-get install maas-region-controller maas-region-api maas-dns -y"' % i)
+    vip_addr = '.'.join(subnet_ls)       
+    for i in range(1,4):
+        maas_url = 'http://' + get_container_ip('maas-snap-%s' %i ) + ':5240/MAAS'
+        run('lxc exec maas-snap-%s -- sh -c "sudo maas init region+rack --database-uri postgres://maas:password@%s/maasdb --maas-url %s --force"' % (i,vip_addr,maas_url) )
+        sleep(30)
 def configure_kvm_host():
     # run at the end, so it doesn't muck with get_ip function
     pass
@@ -94,28 +83,41 @@ def configure_kvm_host():
 # </network>'''
 
 def configure_maas_network_on_containers():
-    pass
+    cmd1 = 'lxc config device add maas-snap-1 eth1 nic nictype=bridged parent=virbr-maas'
+    cmd2 = 'lxc config device add maas-snap-2 eth1 nic nictype=bridged parent=virbr-maas'
+    cmd3 = 'lxc config device add maas-snap-2 eth1 nic nictype=bridged parent=virbr-maas'
+    run(cmd1)
+    run(cmd2)
+    run(cmd3)
+ 
+
 
 def configure_lxd_profile():
     profile_template = '''####
 config:
+  raw.lxc: |-
+    lxc.mount.auto=sys:rw
+    lxc.cgroup.devices.allow = c 10:237 rwm
+    lxc.cgroup.devices.allow = b 7:* rwm
+  security.nesting: "true"
   boot.autostart: "false" 
   user.user-data: |
     #cloud-config
-    apt_sources:  
-      - source: "ppa:maas/2.9"  
+    package_update: true
     packages:
       - openssh-server
       - corosync
       - pacemaker
+      - pcs
       - crmsh
       - postgresql
-      - maas-rack-controller
+      - squashfuse
+    snap:
+      commands:
+        00: ['install', 'maas-cli']
+        01: ['install', 'maas']
     ssh_import_id:
        - lp:gabriel1109    
-    package_update: true
-    package_upgrade: true
-
 description: Default LXD profile
 devices:
   eth0:
@@ -178,7 +180,7 @@ def is_juju_installed():
 
 def is_maas_installed():
     for i in range(1,4):
-        cmd = "lxc exec maas-snap-%s -- sh -c 'dpkg -l|grep maas-rack'" % (i)
+        cmd = "lxc exec maas-snap-%s snap list|grep maas" % (i)
         output = run(cmd)   
         if output:
             continue
@@ -198,7 +200,7 @@ def is_postgres_installed():
 
 def create_containers():
     cleanup = "lxc delete maas-snap-1 --force && lxc delete maas-snap-2 --force && lxc delete maas-snap-3 --force"
-    cmd = "lxc launch ubuntu:focal maas-snap-1 -p maas && lxc launch ubuntu:focal maas-snap-2 -p maas  && lxc launch ubuntu:focal maas-snap-3 -p maas"
+    cmd = "lxc launch ubuntu:bionic maas-snap-1 -p maas && lxc launch ubuntu:bionic maas-snap-2 -p maas  && lxc launch ubuntu:bionic maas-snap-3 -p maas"
     try:
         run(cleanup)
     except:
@@ -216,6 +218,7 @@ def generate_netplan(container_name):
     ip = get_container_ip(container_name)
     gateway = get_lxd_bridge_gateway('lxdbr0')
     cidr = get_lxd_bridge_subnet('lxdbr0')
+    eth1_ip = '192.168.122' + str(randint(2,254))
     template = '''#####
 network:
     version: 2
@@ -226,7 +229,12 @@ network:
             gateway4: %s
             nameservers:
                 addresses: [8.8.8.8]
-''' % (ip, cidr, gateway)   
+        eth1:
+            dhcp4: false
+            addresses: [%s/24]
+            nameservers:
+                addresses: [%s]        
+''' % (ip, cidr, gateway, eth1_ip, eth1_ip)   
 
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
         tmp_file.write(template)  
@@ -245,7 +253,7 @@ ssl = on
 ssl_cert_file = '/etc/ssl/certs/ssl-cert-snakeoil.pem'
 ssl_key_file = '/etc/ssl/private/ssl-cert-snakeoil.key'
 log_timezone = 'Etc/UTC'
-stats_temp_directory = '/var/run/postgresql/12-main.pg_stat_tmp'
+stats_temp_directory = '/var/run/postgresql/10-main.pg_stat_tmp'
 datestyle = 'iso, mdy'
 timezone = 'Etc/UTC'
 default_text_search_config = 'pg_catalog.english'
@@ -258,7 +266,7 @@ hot_standby_feedback = on
 restart_after_crash = off
 max_connections = 300
 synchronous_commit = on
-#data_directory = '/var/lib/postgresql/12/main/'
+#data_directory = '/var/lib/postgresql/10/main/'
 '''
     container_one_ip = get_container_ip('maas-snap-1')
     container_two_ip = get_container_ip('maas-snap-2')
@@ -269,37 +277,36 @@ synchronous_commit = on
     subnet_ls[3] = '0'
     subnet_addr = '.'.join(subnet_ls) + '/' + cidr
     # initialize maas db before doing ha
-    run('''lxc exec maas-snap-1 -- sh -c "pg_ctlcluster 12 main start"''')
     run('''lxc exec maas-snap-1 -- sh -c "sudo -u postgres psql -c \\"CREATE USER \\"maas\\" WITH ENCRYPTED PASSWORD 'password'\\""''')
     run("""lxc exec maas-snap-1 -- sh -c 'sudo -u postgres createdb -O "maas" "maasdb"'""")
-    run('lxc exec maas-snap-1 -- sh -c "sudo systemctl restart postgresql"')    
+    run('lxc exec maas-snap-1 sudo systemctl restart postgresql')    
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
         tmp_file.write(postgres_conf_template)
 
     for i in range(1,4):
         # configure postgres.conf
         lxd_push_command = 'lxc file push %s maas-snap-%s/home/ubuntu/postgresql.conf' % (tmp_file.name, i)
-        lxd_cp_command = 'lxc exec maas-snap-%s sudo cp /home/ubuntu/postgresql.conf /etc/postgresql/12/main/postgresql.conf' % (i)
+        lxd_cp_command = 'lxc exec maas-snap-%s sudo cp /home/ubuntu/postgresql.conf /etc/postgresql/10/main/postgresql.conf' % (i)
         run(lxd_push_command)
         run(lxd_cp_command)
         # configure pg_hba.conf
-        replication_cmd="lxc exec maas-snap-%s -- sh -c 'echo host    replication    postgres     %s    trust |sudo tee -a /etc/postgresql/12/main/pg_hba.conf'"  \
+        replication_cmd="lxc exec maas-snap-%s -- sh -c 'echo host    replication    postgres     %s    trust |sudo tee -a /etc/postgresql/10/main/pg_hba.conf'"  \
         % (i, subnet_addr)
-        access_cmd="lxc exec maas-snap-%s -- sh -c 'echo host    maasdb    maas     %s   md5 |sudo tee -a /etc/postgresql/12/main/pg_hba.conf'"  \
+        access_cmd="lxc exec maas-snap-%s -- sh -c 'echo host    maasdb    maas     %s   md5 |sudo tee -a /etc/postgresql/10/main/pg_hba.conf'"  \
         % (i, subnet_addr)  
         run(replication_cmd)
         run(access_cmd)
-    #    run("""lxc exec maas-snap-%s -- sh -c 'sed -i "s/\\^node/node/g" /usr/lib/ocf/resource.d/heartbeat/pgsql'""" % i)
+        run("""lxc exec maas-snap-%s -- sh -c 'sed -i "s/\\^node/node/g" /usr/lib/ocf/resource.d/heartbeat/pgsql'""" % i)
         # configure pg stat
-        run('''lxc exec maas-snap-%s -- sh -c \'echo "d /var/run/postgresql/12-main.pg_stat_tmp 2750 postgres postgres" > /etc/tmpfiles.d/12-main.pg_stat_tmp.conf\'''' % i)
-        run("lxc exec maas-snap-%s -- sh -c 'systemd-tmpfiles --create'" % i)
+        run('''lxc exec maas-snap-%s -- sh -c \'echo "d /var/run/postgresql/10-main.pg_stat_tmp 2750 postgres postgres" > /etc/tmpfiles.d/1-main.pg_stat_tmp.conf\'''' % i)
+        run("lxc exec maas-snap-%s systemd-tmpfiles --create" % i)
 
         if i == 1:
-            copy_cmd = "lxc exec maas-snap-1 -- sh -c 'sudo cp /etc/postgresql/12/main/pg_hba.conf /var/lib/postgresql/12/main/.'"
-            copy_cmd2 = "lxc exec maas-snap-1 -- sh -c 'sudo cp /etc/postgresql/12/main/pg_ident.conf /var/lib/postgresql/12/main/.'"
-            chown_cmd = "lxc exec maas-snap-1 -- sh -c 'sudo chown postgres:postgres /var/lib/postgresql/12/main/pg_hba.conf'"
-            chown_cmd2 = "lxc exec maas-snap-1 -- sh -c 'sudo chown postgres:postgres /var/lib/postgresql/12/main/pg_ident.conf'"
-            install_cmd = "lxc exec maas-snap-1 -- sh -c 'install -o postgres -g postgres -m 0700 -d /var/lib/postgresql/12/main/tmp'"
+            copy_cmd = "lxc exec maas-snap-1 -- sh -c 'sudo cp /etc/postgresql/10/main/pg_hba.conf /var/lib/postgresql/10/main/.'"
+            copy_cmd2 = "lxc exec maas-snap-1 -- sh -c 'sudo cp /etc/postgresql/10/main/pg_ident.conf /var/lib/postgresql/10/main/.'"
+            chown_cmd = "lxc exec maas-snap-1 -- sh -c 'sudo chown postgres:postgres /var/lib/postgresql/10/main/pg_hba.conf'"
+            chown_cmd2 = "lxc exec maas-snap-1 -- sh -c 'sudo chown postgres:postgres /var/lib/postgresql/10/main/pg_ident.conf'"
+            install_cmd = "lxc exec maas-snap-1 -- sh -c 'install -o postgres -g postgres -m 0700 -d /var/lib/postgresql/10/main/tmp'"
             run(copy_cmd)
             run(chown_cmd)
             run(copy_cmd2)
@@ -309,12 +316,12 @@ synchronous_commit = on
             sync_postgres_slaves()
         # configure service to start manually
        
-        manual_cmd="lxc exec maas-snap-%s -- sh -c 'echo manual |sudo tee /etc/postgresql/12/main/start.conf'"  % (i)
+        manual_cmd="lxc exec maas-snap-%s -- sh -c 'echo manual |sudo tee /etc/postgresql/10/main/start.conf'"  % (i)
         run(manual_cmd)
-#        stop_cmd="lxc exec maas-snap-%s -- sh -c 'sudo systemctl daemon-reload && sudo systemctl stop postgresql'"  % (i)
-#        daemon_cmd="lxc exec maas-snap-%s -- sh -c 'sudo systemctl disable postgresql && sudo systemctl disable postgresql@12-main'"  % (i)
-#        run(stop_cmd)
-#        run(daemon_cmd)
+        stop_cmd="lxc exec maas-snap-%s -- sh -c 'sudo systemctl daemon-reload && sudo systemctl stop postgresql'"  % (i)
+        daemon_cmd="lxc exec maas-snap-%s -- sh -c 'sudo systemctl disable postgresql && sudo systemctl disable postgresql@10-main'"  % (i)
+        run(stop_cmd)
+        run(daemon_cmd)
         configure_corosync()
     configure_postgres_pacemaker()
     sleep(65)
@@ -330,10 +337,10 @@ def sync_postgres_slaves(vip=None):
         master_ip=vip_addr        
     stop_cmd1 = "lxc exec maas-snap-2 -- sh -c 'sudo systemctl stop postgresql'"
     stop_cmd2 = "lxc exec maas-snap-3 -- sh -c 'sudo systemctl stop postgresql'"
-    delete_cmd1 = "lxc exec maas-snap-2 -- sh -c 'sudo rm -rf /var/lib/postgresql/12/main/*'"
-    delete_cmd2 = "lxc exec maas-snap-3 -- sh -c 'sudo rm -rf /var/lib/postgresql/12/main/*'"
-    sync_cmd1 = "lxc exec maas-snap-2 -- sh -c 'sudo -u postgres pg_basebackup -h %s -D /var/lib/postgresql/12/main -v --wal-method=stream'" % (master_ip)
-    sync_cmd2 = "lxc exec maas-snap-3 -- sh -c 'sudo -u postgres pg_basebackup -h %s -D /var/lib/postgresql/12/main -v --wal-method=stream'" % (master_ip)
+    delete_cmd1 = "lxc exec maas-snap-2 -- sh -c 'sudo rm -rf /var/lib/postgresql/10/main/*'"
+    delete_cmd2 = "lxc exec maas-snap-3 -- sh -c 'sudo rm -rf /var/lib/postgresql/10/main/*'"
+    sync_cmd1 = "lxc exec maas-snap-2 -- sh -c 'sudo -u postgres pg_basebackup -h %s -D /var/lib/postgresql/10/main -v --wal-method=stream'" % (master_ip)
+    sync_cmd2 = "lxc exec maas-snap-3 -- sh -c 'sudo -u postgres pg_basebackup -h %s -D /var/lib/postgresql/10/main -v --wal-method=stream'" % (master_ip)
     run(stop_cmd1)
     run(stop_cmd2)
     run(delete_cmd1)
@@ -350,6 +357,8 @@ def configure_postgres_pacemaker():
     subnet_ls[3] = '253'
     vip_addr = '.'.join(subnet_ls)        
     script_template = '''#!/bin/bash
+sed -i 's/\\^node/node/g' /usr/lib/ocf/resource.d/heartbeat/pgsql
+
 crm options pager cat
 crm configure property cluster-recheck-interval=10s
 crm configure property stonith-enabled="false"
@@ -358,11 +367,11 @@ crm configure rsc_defaults migration-threshold=10
 
 crm configure primitive pgsql ocf:heartbeat:pgsql \
   params rep_mode="sync" \
-    pgctl="/usr/lib/postgresql/12/bin/pg_ctl" \
+    pgctl="/usr/lib/postgresql/10/bin/pg_ctl" \
     psql="/usr/bin/psql" \
-    pgdata="/var/lib/postgresql/12/main/" \
+    pgdata="/var/lib/postgresql/10/main/" \
     socketdir="/var/run/postgresql" \
-    config="/etc/postgresql/12/main/postgresql.conf" logfile="/var/log/postgresql/postgresql-12-ha.log" \
+    config="/etc/postgresql/10/main/postgresql.conf" logfile="/var/log/postgresql/postgresql-10-ha.log" \
     master_ip="%s" \
     node_list="maas-snap-1 maas-snap-2 maas-snap-3" \
     primary_conninfo_opt="keepalives_idle=60 \
@@ -389,14 +398,13 @@ crm configure primitive res_pgsql_vip ocf:heartbeat:IPaddr2 \
 crm configure colocation pgsql_vip inf: res_pgsql_vip \
                 ms_pgsql:Master
 
-crm configure order ord_promote Mandatory: ms_pgsql:promote \
+crm configure order ord_promote 0: ms_pgsql:promote \
                 res_pgsql_vip:start symmetrical=false
 
-crm configure order ord_demote Optional: ms_pgsql:demote \
+crm configure order ord_demote inf: ms_pgsql:demote \
                 res_pgsql_vip:stop symmetrical=false
 
-crm resource cleanup pgsql
-crm resource prmote ms_pgql''' % (vip_addr, vip_addr, cidr)
+crm resource cleanup pgsql''' % (vip_addr, vip_addr, cidr)
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
         tmp_file.write(script_template)
     lxd_push_command = 'lxc file push %s maas-snap-1/home/ubuntu/pacemaker.sh' % (tmp_file.name)
@@ -415,17 +423,17 @@ def sync_slaves_if_not():
     subnet_ls[3] = '253'
     vip_addr = '.'.join(subnet_ls)   
 
-    cmd1 = "lxc exec maas-snap-1 -- sh -c 'sudo crm status|grep -i stopped|grep maas-snap-2'"
-    cmd2 = "lxc exec maas-snap-1 -- sh -c 'sudo crm status|grep -i stopped|grep maas-snap-3'"
+    cmd1 = "lxc exec maas-snap-1 -- sh -c 'sudo crm status|grep unknown|grep maas-snap-2'"
+    cmd2 = "lxc exec maas-snap-1 -- sh -c 'sudo crm status|grep unknown|grep maas-snap-3'"
     output1 = run(cmd1) 
     if output1:
-        cmd_sync = "lxc exec maas-snap-2 -- sh -c 'sudo rm -rf /var/lib/postgresql/12/main/* && sudo -u postgres pg_basebackup -h %s -D /var/lib/postgresql/12/main -v --wal-method=stream'" % vip_addr
+        cmd_sync = "lxc exec maas-snap-2 -- sh -c 'sudo rm -rf /var/lib/postgresql/10/main/* && sudo -u postgres pg_basebackup -h %s -D /var/lib/postgresql/10/main -v --wal-method=stream'" % vip_addr
         run(cmd_sync)
         run('lxc exec maas-snap-2 sudo crm resource cleanup pgsql')
         sleep(10)
     output2 = run(cmd2) 
     if output2:
-        cmd_sync = "lxc exec maas-snap-3 -- sh -c 'sudo rm -rf /var/lib/postgresql/12/main/* && sudo -u postgres pg_basebackup -h %s -D /var/lib/postgresql/12/main -v --wal-method=stream'" % vip_addr
+        cmd_sync = "lxc exec maas-snap-3 -- sh -c 'sudo rm -rf /var/lib/postgresql/10/main/* && sudo -u postgres pg_basebackup -h %s -D /var/lib/postgresql/10/main -v --wal-method=stream'" % vip_addr
         run(cmd_sync)
         run('lxc exec maas-snap-3 sudo crm resource cleanup pgsql')
 
@@ -482,7 +490,7 @@ logging {
         lxd_cp_command = 'lxc exec maas-snap-%s sudo cp /home/ubuntu/corosync.conf /etc/corosync/corosync.conf' % (i)
         run(lxd_push_command)
         run(lxd_cp_command)
-        run('lxc exec maas-snap-%s -- sh -c "sudo systemctl restart corosync && sudo systemctl restart pacemaker"' % i)
+        run('lxc exec maas-snap-%s sudo systemctl restart corosync' % i)
 
 def configure_hosts_file():
     container_one_ip = get_container_ip('maas-snap-1')
@@ -496,6 +504,15 @@ def configure_hosts_file():
         run(lxd_two_cmd)
         run(lxd_three_cmd)
 
+def create_maas_admin():
+    pass
+
+def import_images_and_keys():
+    pass
+
+def add_kvm_pod():
+    pass
+
 
 configure_lxd()
 create_containers()
@@ -503,11 +520,11 @@ while True:
     if is_maas_installed() and is_postgres_installed():
         break
     else:
-        sleep(60)       
+        sleep(30)       
 generate_netplan('maas-snap-1')
 generate_netplan('maas-snap-2')
 generate_netplan('maas-snap-3')
 configure_hosts_file()
-sleep(240)
+sleep(20)
 configure_postgres()
-configure_maas()
+configure_maas_snaps()
