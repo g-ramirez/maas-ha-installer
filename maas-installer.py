@@ -678,6 +678,7 @@ def main():
     configure_maas_network_on_containers()
     add_kvm_pod(username)
     pg_sql_cleanup()
+    sleep(120)
     ensure_haproxy_started()
     print("Ready to go....")
     print("Access MaaS at http://%s" % MAAS_VIP)
