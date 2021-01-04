@@ -648,7 +648,7 @@ def pg_sql_cleanup():
 
 def ensure_haproxy_started():
     for i in range(1,4):
-        cmd = 'lxc exec maas-snap-%s -- sh -c "sudo systemctl restart haproxy"' % i
+        cmd = 'lxc exec maas-snap-%s -- sh -c "sudo systemctl start haproxy"' % i
         run(cmd)        
 
 def main():
