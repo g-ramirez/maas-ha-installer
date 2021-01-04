@@ -644,7 +644,7 @@ def pg_sql_cleanup():
     for i in range(1,4):
         cmd = 'lxc exec maas-snap-%i -- sh -c "rm /var/lib/pgsql/tmp/PGSQL.lock"' % i
         run(cmd)
-        run('lxc exec maas-snap-%i -- sh -c "crm_resource --cleanup"s')
+        run('lxc exec maas-snap-%i -- sh -c "crm_resource --cleanup"')
 
 def ensure_haproxy_started():
     for i in range(1,4):
