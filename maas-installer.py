@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import json
 import os
@@ -8,6 +8,9 @@ import sys
 import tempfile
 from time import sleep
 from random import randint
+
+MAAS_VIP = ''
+
 def run(cmd, output=True, shell=True, poll=False):
     print(cmd)
     if output:
@@ -36,7 +39,7 @@ def install_snaps_on_host():
     if not is_juju_installed():
         run(juju_install_cmd)
 
-def configure_lxd():
+def configure_lxd(username=None):
     # check if net up and if there is storage + profile
     if get_lxd_bridge_subnet('lxdbr0'):
         print("lxdbr0 already configured...skipping")
@@ -54,47 +57,54 @@ def configure_lxd():
     if run(profile_cmd):
         print("Profile already created....skipping")
     else:
-        configure_lxd_profile()    
+        configure_lxd_profile(username)    
 
-def get_user_lp_id():
-    lp_id = input('Enter launchpad id: ')
-    return lp_id
+def get_user_info():
+   pass
 
 def configure_maas_snaps():
+    sleep(30)
+    pg_sql_cleanup()
     gateway = get_lxd_bridge_gateway('lxdbr0')
     subnet_ls = gateway.split('.')
     subnet_ls[3] = '253'
-    vip_addr = '.'.join(subnet_ls)       
+    vip_addr = '.'.join(subnet_ls)  
+    secret = ''     
     for i in range(1,4):
         maas_url = 'http://' + get_container_ip('maas-snap-%s' %i ) + ':80/MAAS'
         run('lxc exec maas-snap-%s -- sh -c "sudo maas init region+rack --database-uri postgres://maas:password@%s/maasdb --maas-url %s --force"' % (i,vip_addr,maas_url) )
         sleep(30)
+                
         if i == 3:
             run('lxc exec maas-snap-3 sudo crm resource cleanup pgsql')
+
 def configure_kvm_host():
     # run at the end, so it doesn't muck with get_ip function
     pass
-# maas_network_template='''
-# <network>
-#   <name>maas</name>
-#   <forward mode='nat'/>
-#   <bridge name='virbr-maas' stp='on' delay='0'/>
-#   <mac address='52:54:00:01:83:8a'/>
-#   <ip address='192.168.122.1' netmask='255.255.255.0'>
-#   </ip>
-# </network>'''
+    template='''
+<network>
+  <name>maas</name>
+  <forward mode='nat'/>
+  <bridge name='virbr-maas' stp='on' delay='0'/>
+  <mac address='52:54:00:02:83:8a'/>
+  <ip address='192.168.122.1' netmask='255.255.255.0'>
+  </ip>
+</network>'''
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
+        tmp_file.write(template)
+    cmd = 'virsh net-create %s' % (tmp_file.name)
+    run(cmd)
 
 def configure_maas_network_on_containers():
-    cmd1 = 'lxc config device add maas-snap-1 eth1 nic nictype=bridged parent=virbr-maas'
-    cmd2 = 'lxc config device add maas-snap-2 eth1 nic nictype=bridged parent=virbr-maas'
-    cmd3 = 'lxc config device add maas-snap-2 eth1 nic nictype=bridged parent=virbr-maas'
-    run(cmd1)
-    run(cmd2)
-    run(cmd3)
- 
+    for i in range(1,4):
+        cmd = 'lxc config device add maas-snap-%s eth1 nic nictype=bridged parent=virbr-maas' % i 
+        run(cmd)
+        run('lxc exec maas-snap-%s sudo netplan apply' % i)
+    sleep(60)
+    pg_sql_cleanup()
 
 
-def configure_lxd_profile():
+def configure_lxd_profile(lp_id):
     profile_template = '''####
 config:
   raw.lxc: |-
@@ -120,7 +130,7 @@ config:
         00: ['install', 'maas-cli']
         01: ['install', 'maas']
     ssh_import_id:
-       - lp:gabriel1109    
+       - lp:%s    
 description: Default LXD profile
 devices:
   eth0:
@@ -156,7 +166,7 @@ devices:
   loop7:
     path: /dev/loop7
     type: unix-block    
-'''
+''' % (lp_id)
 
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
         tmp_file.write(profile_template)    
@@ -256,7 +266,7 @@ backend maas
     server localhost localhost:5240 check
     server maas-api-1 %s:5240 check
     server maas-api-2 %s:5240 check
-    server maas-api-2 %s:5240 check''' % (container_one_ip, container_two_ip, container_three_ip)
+    server maas-api-3 %s:5240 check''' % (container_one_ip, container_two_ip, container_three_ip)
 
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
         tmp_file.write(template)  
@@ -265,7 +275,7 @@ backend maas
         lxd_push_command = 'lxc file push %s %s/home/ubuntu/haproxy.conf' % (tmp_file.name, 'maas-snap-%s' % i)
         run(lxd_push_command)
         lxd_cp_command = 'lxc exec %s -- sh -c "sudo cp /home/ubuntu/haproxy.conf /etc/haproxy/haproxy.cfg"' % ('maas-snap-%s' % i)
-        lxd_haproxy_reset = 'lxc exec %s -- sh -c "sudo systemctl restart haproxy"' % ('maas-snap-%s' % i)
+        lxd_haproxy_reset = 'lxc exec %s -- sh -c "sudo systemctl enable haproxy && systemctl restart haproxy"' % ('maas-snap-%s' % i)
         run(lxd_cp_command)
         run(lxd_haproxy_reset)
 
@@ -449,7 +459,7 @@ crm configure ms ms_pgsql pgsql meta master-max="1" \
     notify="true"
 
 crm configure primitive res_pgsql_vip ocf:heartbeat:IPaddr2 \
-    params ip=%s cidr_netmask=%s op monitor interval=10s meta \
+    params ip=%s cidr_netmask=%s op monitor interval=30s meta \
     migration-threshold=0
 crm configure colocation pgsql_vip inf: res_pgsql_vip \
                 ms_pgsql:Master
@@ -575,17 +585,42 @@ def import_images_and_keys():
     api_key = run('lxc exec maas-snap-3 -- sh -c "maas apikey --username admin"')
     login_cmd = 'lxc exec maas-snap-3 -- sh -c "maas login admin %s %s"'  % (maas_url, api_key.decode())
     run(login_cmd)
+    bionic_cmd = 'maas admin boot-source-selections create 1 os="ubuntu" release="bionic" arches="amd64" \
+    subarches="*" labels="*"'
+    focal_cmd = 'maas admin boot-source-selections create 2 \
+    os="ubuntu" release="focal" arches="amd64" \
+    subarches="*" labels="*"'
+    import_cmd = 'maas admin boot-resources import'
+    run('lxc exec maas-snap-3 -- sh -c "{}"'.format(bionic_cmd))
+    run('lxc exec maas-snap-3 -- sh -c "{}"'.format(focal_cmd))
+    run('lxc exec maas-snap-3 -- sh -c "{}"'.format(import_cmd))
+
+def add_kvm_pod(username):
+    #NOTE: don't run this until configuring DHCP
+    #Probably should add as a disclaimer that doing so will result in all current VMS getting comissioned if anyone runs this
+    gateway = get_lxd_bridge_gateway('lxdbr0')
+    cmd = 'maas admin vm-hosts create type=virsh power_address=%s@%s/system' % (username,gateway)
+    run('lxc exec maas-snap-3 -- sh -c "%s"' % cmd) 
 
 
-def add_kvm_pod():
+def enable_dhcp_on_maas_network():
     pass
 
+def configure_ssh_key(location):
+    #NOTE: ask user for location of id_rsa at beginning
+    for i in range(1,4):
+        run('lxc exec maas-snap-%s -- sh -c "mkdir /var/snap/maas/current/root/.ssh"' %i )
+        run('lxc file push %s maas-snap-%s/var/snap/maas/current/root/.ssh/id_rsa' % (location, i))
+        run('lxc exec maas-snap-%s -- sh -c "chmod 400 /var/snap/maas/current/root/.ssh/id_rsa"' % i)
+
 def configure_maas_vip():
+    global MAAS_VIP
     gateway = get_lxd_bridge_gateway('lxdbr0')
     cidr = get_lxd_bridge_subnet('lxdbr0')
     subnet_ls = gateway.split('.')
     subnet_ls[3] = '252'
     vip_addr = '.'.join(subnet_ls) 
+    MAAS_VIP = vip_addr
     template = '''####
 #!/bin/bash
 crm configure property stonith-enabled="false"
@@ -603,23 +638,48 @@ crm configure primitive haproxy lsb:haproxy op monitor interval=15s''' % (vip_ad
     run(lxd_push_command)
     run(lxd_chmod_command)
     run(lxd_create_command)
+    ensure_haproxy_started()
 
+def pg_sql_cleanup():
+    for i in range(1,4):
+        cmd = 'lxc exec maas-snap-%i -- sh -c "rm /var/lib/pgsql/tmp/PGSQL.lock"' % i
+        run(cmd)
+        run('lxc exec maas-snap-%i -- sh -c "crm_resource --cleanup"s')
 
-# configure_lxd()
-# create_containers()
-# while True:
-#     if is_maas_installed() and is_postgres_installed() and is_haproxy_installed():
-#         break
-#     else:
-#         sleep(30)       
-# generate_netplan('maas-snap-1')
-# generate_netplan('maas-snap-2')
-# generate_netplan('maas-snap-3')
-# configure_hosts_file()
-# sleep(90)
-# configure_postgres()
-# configure_haproxy()
-# configure_maas_snaps()
-# create_maas_admin()
-# configure_maas_vip()
-import_images_and_keys()
+def ensure_haproxy_started():
+    for i in range(1,4):
+        cmd = 'lxc exec maas-snap-%s -- sh -c "sudo systemctl restart haproxy"' % i
+        run(cmd)        
+
+def main():
+    lp_id = input('Enter launchpad id: ' )
+    username = input('Enter your username (e.g. /home/$username): ')
+    id_rsa_path = input('Enter path to private key, e.g. (/home/$username/.ssh/id_rsa) : ')
+    configure_lxd(lp_id)
+    create_containers()
+    while True:
+        if is_maas_installed() and is_postgres_installed() and is_haproxy_installed():
+            break
+        else:
+            sleep(30)       
+    generate_netplan('maas-snap-1')
+    generate_netplan('maas-snap-2')
+    generate_netplan('maas-snap-3')
+    configure_hosts_file()
+    sleep(90)
+    configure_postgres()
+    configure_haproxy()
+    configure_maas_snaps()
+    create_maas_admin()
+    configure_maas_vip()
+    import_images_and_keys()
+    configure_ssh_key(id_rsa_path)
+    configure_kvm_host()
+    configure_maas_network_on_containers()
+    add_kvm_pod(username)
+    pg_sql_cleanup()
+    ensure_haproxy_started()
+    print("Ready to go....")
+    print("Access MaaS at http://%s" % MAAS_VIP)
+
+main()
