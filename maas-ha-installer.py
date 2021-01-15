@@ -198,7 +198,7 @@ def is_postgres_installed():
 
 def create_containers():
     cleanup = "lxc delete maas-snap-1 --force && lxc delete maas-snap-2 --force && lxc delete maas-snap-3 --force"
-    cmd = "lxc launch ubuntu:bionic maas-snap-1 -p maas && lxc launch ubuntu:bionic maas-snap-2 -p maas  && lxc launch ubuntu:bionic maas-snap-3 -p maas"
+    cmd = "lxc launch ubuntu:focal maas-snap-1 -p maas && lxc launch ubuntu:focal maas-snap-2 -p maas  && lxc launch ubuntu:focal maas-snap-3 -p maas"
     try:
         run(cleanup)
     except:
