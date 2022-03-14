@@ -300,7 +300,7 @@ network:
     bridges:
         br0:
             dhcp4: false
-            address: [%s/24]
+            addresses: [%s/24]
             nameservers:
                 addresses: [%s]
             interfaces: [eth1]                        
