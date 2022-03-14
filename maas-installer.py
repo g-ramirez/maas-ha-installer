@@ -87,7 +87,7 @@ def configure_kvm_host():
   <forward mode='nat'/>
   <bridge name='virbr-maas' stp='on' delay='0'/>
   <mac address='52:54:00:02:83:8a'/>
-  <ip address='192.168.122.1' netmask='255.255.255.0'>
+  <ip address='192.168.124.1' netmask='255.255.255.0'>
   </ip>
 </network>'''
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
@@ -574,8 +574,8 @@ def configure_hosts_file():
         run(lxd_two_cmd)
         run(lxd_three_cmd)
 
-def create_maas_admin():
-    cmd1 = 'lxc exec maas-snap-3 -- sh -c "maas createadmin --username admin --password password --email gabrielramirez1109@gmail.com --ssh-import lp:gabriel1109"'
+def create_maas_admin(email, lp_id):
+    cmd1 = 'lxc exec maas-snap-3 -- sh -c "maas createadmin --username admin --password password --email %s --ssh-import lp:%s"' % (email, lp_id)
     cmd2 = 'lxc exec maas-snap-3 -- sh -c "maas apikey --username admin |tee -a /home/ubuntu/api-key"'
     run(cmd1)
     run(cmd2)
@@ -648,11 +648,12 @@ def pg_sql_cleanup():
 
 def ensure_haproxy_started():
     for i in range(1,4):
-        cmd = 'lxc exec maas-snap-%s -- sh -c "sudo systemctl start haproxy"' % i
+        cmd = 'lxc exec maas-snap-%s -- sh -c "sudo systemctl restart haproxy"' % i
         run(cmd)        
 
 def main():
     lp_id = input('Enter launchpad id: ' )
+    email = input('Enter email: ')
     username = input('Enter your username (e.g. /home/$username): ')
     id_rsa_path = input('Enter path to private key, e.g. (/home/$username/.ssh/id_rsa) : ')
     configure_lxd(lp_id)
@@ -670,7 +671,7 @@ def main():
     configure_postgres()
     configure_haproxy()
     configure_maas_snaps()
-    create_maas_admin()
+    create_maas_admin(email, lp_id)
     configure_maas_vip()
     import_images_and_keys()
     configure_ssh_key(id_rsa_path)
@@ -678,9 +679,9 @@ def main():
     configure_maas_network_on_containers()
     add_kvm_pod(username)
     pg_sql_cleanup()
-    sleep(120)
     ensure_haproxy_started()
     print("Ready to go....")
     print("Access MaaS at http://%s" % MAAS_VIP)
+    print("Username is 'admin' and password is 'password'")
 
 main()

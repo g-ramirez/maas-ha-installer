@@ -27,7 +27,7 @@ def get_lxd_bridge_gateway(lxd_br):
     return run(cmd).decode("utf-8") 
 
 def install_snaps_on_host():
-    configure_snappy_cmd = 'sudo snap install core18 && sudo snap install snapd'
+    configure_snappy_cmd = 'sudo snap install snapd'
     lxd_install_cmd = 'sudo snap install lxd --edge'
     juju_install_cmd = 'sudo snap install juju --classic --channel=latest/edge'
     if not is_lxd_installed():
@@ -36,7 +36,7 @@ def install_snaps_on_host():
     if not is_juju_installed():
         run(juju_install_cmd)
 
-def configure_lxd():
+def configure_lxd(username=None):
     # check if net up and if there is storage + profile
     if get_lxd_bridge_subnet('lxdbr0'):
         print("lxdbr0 already configured...skipping")
@@ -46,15 +46,16 @@ def configure_lxd():
     if run(storage_cmd):
         print("a storage pool is already configured....")
     else:
-        run('sudo apt-get install zfsutils-linux -y')
-        status=run("lxc storage create default zfs",output=False)    
+        run('sudo apt install zfsutils-linux -y')
+        status=run("lxc storage create default zfs",output=False)
         if int(status)==1:
             run("lxc storage create default dir ")
     profile_cmd = 'lxc profile list|grep maas|grep -v NAME|grep -v "+-----"'
     if run(profile_cmd):
         print("Profile already created....skipping")
     else:
-        configure_lxd_profile()    
+        configure_lxd_profile(username)
+ 
 
 def get_user_lp_id():
     lp_id = input('Enter launchpad id: ')
@@ -96,26 +97,31 @@ def configure_kvm_host():
 def configure_maas_network_on_containers():
     pass
 
-def configure_lxd_profile():
+def configure_lxd_profile(lp_id):
     profile_template = '''####
 config:
+  raw.lxc: |-
+    lxc.mount.auto=sys:rw
+    lxc.cgroup.devices.allow = c 10:237 rwm
+    lxc.cgroup.devices.allow = b 7:* rwm
+  security.nesting: "true"
   boot.autostart: "false" 
   user.user-data: |
     #cloud-config
-    apt_sources:  
-      - source: "ppa:maas/2.9"  
+    package_update: true
     packages:
       - openssh-server
+      - haproxy
       - corosync
       - pacemaker
       - crmsh
       - postgresql
-      - maas-rack-controller
+    snap:
+      commands:
+        00: ['install', 'maas-cli']
+        01: ['install', 'maas']
     ssh_import_id:
-       - lp:gabriel1109    
-    package_update: true
-    package_upgrade: true
-
+       - lp:%s    
 description: Default LXD profile
 devices:
   eth0:
@@ -151,11 +157,11 @@ devices:
   loop7:
     path: /dev/loop7
     type: unix-block    
-'''
+''' % (lp_id)
 
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
-        tmp_file.write(profile_template)    
-    profile_create_cmd="lxc profile create maas" 
+        tmp_file.write(profile_template)
+    profile_create_cmd="lxc profile create maas"
     run(profile_create_cmd)
     profile_edit_cmd="lxc profile edit maas < %s" % (tmp_file.name)
     run(profile_edit_cmd)
@@ -178,7 +184,7 @@ def is_juju_installed():
 
 def is_maas_installed():
     for i in range(1,4):
-        cmd = "lxc exec maas-snap-%s -- sh -c 'dpkg -l|grep maas-rack'" % (i)
+        cmd = "lxc exec maas-snap-%s -- sh -c 'snap list|grep maas'" % (i)
         output = run(cmd)   
         if output:
             continue
@@ -195,6 +201,29 @@ def is_postgres_installed():
         else:
             return False
     return True    
+
+
+def is_haproxy_installed():
+    for i in range(1,4):
+        cmd = "lxc exec maas-snap-%s -- sh -c 'dpkg -l|grep corosync'" % (i)
+        output = run(cmd)
+        if output:
+            continue
+        else:
+            return False
+    return True
+
+def pg_sql_cleanup():
+    for i in range(1,4):
+        cmd = 'lxc exec maas-snap-%i -- sh -c "rm /var/lib/pgsql/tmp/PGSQL.lock"' % i
+        run(cmd)
+        run('lxc exec maas-snap-%i -- sh -c "crm_resource --cleanup"' % i)
+
+def ensure_haproxy_started():
+    for i in range(1,4):
+        cmd = 'lxc exec maas-snap-%s -- sh -c "sudo systemctl start haproxy"' % i
+        run(cmd)
+
 
 def create_containers():
     cleanup = "lxc delete maas-snap-1 --force && lxc delete maas-snap-2 --force && lxc delete maas-snap-3 --force"
@@ -497,17 +526,36 @@ def configure_hosts_file():
         run(lxd_three_cmd)
 
 
-configure_lxd()
-create_containers()
-while True:
-    if is_maas_installed() and is_postgres_installed():
-        break
-    else:
-        sleep(60)       
-generate_netplan('maas-snap-1')
-generate_netplan('maas-snap-2')
-generate_netplan('maas-snap-3')
-configure_hosts_file()
-sleep(240)
-configure_postgres()
-configure_maas()
+def main():
+    lp_id = input('Enter launchpad id: ' )
+    username = input('Enter your username (e.g. /home/$username): ')
+    id_rsa_path = input('Enter path to private key, e.g. (/home/$username/.ssh/id_rsa) : ')
+    configure_lxd(lp_id)
+    create_containers()
+    while True:
+        if is_maas_installed() and is_postgres_installed() and is_haproxy_installed():
+            break
+        else:
+            sleep(30)       
+    generate_netplan('maas-snap-1')
+    generate_netplan('maas-snap-2')
+    generate_netplan('maas-snap-3')
+    configure_hosts_file()
+    sleep(90)
+    configure_postgres()
+    configure_haproxy()
+    configure_maas_snaps()
+    create_maas_admin()
+    configure_maas_vip()
+    import_images_and_keys()
+    configure_ssh_key(id_rsa_path)
+    configure_kvm_host()
+    configure_maas_network_on_containers()
+    add_kvm_pod(username)
+    pg_sql_cleanup()
+    sleep(120)
+    ensure_haproxy_started()
+    print("Ready to go....")
+    print("Access MaaS at http://%s" % MAAS_VIP)
+
+main()
