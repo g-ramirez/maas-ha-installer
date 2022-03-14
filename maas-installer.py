@@ -633,7 +633,7 @@ crm configure rsc_defaults migration-threshold=10
 crm configure primitive res_maas_vip ocf:heartbeat:IPaddr2 \
     params ip=%s cidr_netmask=%s op monitor interval=10s meta \
     migration-threshold=0 
-crm configure primitive haproxy lsb:haproxy op monitor interval=15s''' % (vip_addr, cidr)
+crm configure primitive haproxy systemd:haproxy op monitor interval=15s''' % (vip_addr, cidr)
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
         tmp_file.write(template)    
     lxd_push_command = 'lxc file push %s maas-snap-3/home/ubuntu/maas_reg_vip.sh' % (tmp_file.name)
@@ -652,8 +652,10 @@ def pg_sql_cleanup():
 
 def ensure_haproxy_started():
     for i in range(1,4):
-        cmd = 'lxc exec maas-snap-%s -- sh -c "sudo systemctl restart haproxy"' % i
-        run(cmd)        
+        cmd1 = 'lxc exec maas-snap-%s -- sh -c "sudo systemctl stop haproxy"' % i
+        cmd2 = 'lxc exec maas-snap-%s -- sh -c "sudo systemctl start haproxy"' % i
+        run(cmd1)
+        run(cmd2)        
 
 def main():
     lp_id = input('Enter launchpad id: ' )
