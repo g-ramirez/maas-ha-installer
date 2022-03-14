@@ -243,7 +243,7 @@ def create_containers():
 
 def get_container_ip(container_name):
     #cmd = "lxc list %s -c 4 --format csv|awk '{print $1}'" % (container_name)
-    cmd = '''lxc list %s -c 4 --format csv |cut -d "\\"" -f2|awk '{print $1}'|head -1''' % container_name
+    cmd = '''lxc list %s -c 4 --format csv |cut -d "\\"" -f2|grep eth0|awk '{print $1}'|head -1''' % container_name
     ip = run(cmd).decode('utf-8')
     return ip 
 
