@@ -297,9 +297,13 @@ network:
                 addresses: [8.8.8.8]
         eth1:
             dhcp4: false
-            addresses: [%s/24]
+    bridges:
+        br0:
+            dhcp4: false
+            address: [%s/24]
             nameservers:
-                addresses: [%s]        
+                addresses: [%s]
+            interfaces: [eth1]                        
 ''' % (ip, cidr, gateway, eth1_ip, eth1_ip)   
 
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
