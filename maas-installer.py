@@ -284,7 +284,7 @@ def generate_netplan(container_name):
     ip = get_container_ip(container_name)
     gateway = get_lxd_bridge_gateway('lxdbr0')
     cidr = get_lxd_bridge_subnet('lxdbr0')
-    eth1_ip = '192.168.122.' + str(randint(2,254))
+    eth1_ip = '192.168.124.' + str(randint(2,254))
     template = '''#####
 network:
     version: 2
