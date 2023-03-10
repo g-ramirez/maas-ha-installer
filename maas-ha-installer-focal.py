@@ -59,9 +59,6 @@ def configure_lxd(username=None):
     else:
         configure_lxd_profile(username)    
 
-def get_user_info():
-   pass
-
 def configure_maas_snaps():
     sleep(30)
     pg_sql_cleanup()
@@ -80,7 +77,6 @@ def configure_maas_snaps():
 
 def configure_kvm_host():
     # run at the end, so it doesn't muck with get_ip function
-    pass
     template='''
 <network>
   <name>maas</name>
@@ -92,7 +88,7 @@ def configure_kvm_host():
 </network>'''
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp_file:
         tmp_file.write(template)
-    cmd = 'virsh net-create %s' % (tmp_file.name)
+    cmd = 'virsh --connect qemu:///system net-create %s' % (tmp_file.name)
     run(cmd)
 
 def configure_maas_network_on_containers():
