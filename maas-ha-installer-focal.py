@@ -596,7 +596,7 @@ def add_kvm_pod(username):
     #NOTE: don't run this until configuring DHCP
     #Probably should add as a disclaimer that doing so will result in all current VMS getting comissioned if anyone runs this
     gateway = get_lxd_bridge_gateway('lxdbr0')
-    cmd = 'maas admin vm-hosts create type=virsh power_address=%s@%s/system' % (username,gateway)
+    cmd = 'maas admin vm-hosts create type=virsh power_address=qemu+ssh://%s@%s/system' % (username,gateway)
     run('lxc exec maas-snap-3 -- sh -c "%s"' % cmd) 
 
 
@@ -609,6 +609,8 @@ def configure_ssh_key(location):
         run('lxc exec maas-snap-%s -- sh -c "mkdir /var/snap/maas/current/root/.ssh"' %i )
         run('lxc file push %s maas-snap-%s/var/snap/maas/current/root/.ssh/id_rsa' % (location, i))
         run('lxc exec maas-snap-%s -- sh -c "chmod 400 /var/snap/maas/current/root/.ssh/id_rsa"' % i)
+        run('lxc exec maas-snap-%s -- sh -c "chown root:root /var/snap/maas/current/root/.ssh/id_rsa"' % i)
+
 
 def configure_maas_vip():
     global MAAS_VIP
